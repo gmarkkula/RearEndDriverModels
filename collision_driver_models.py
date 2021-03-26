@@ -72,6 +72,10 @@ class Scenario(Parameterizable):
         """ Sets time series vectors for the scenario, with the specified time
             step.
         """
+
+        ### NOTE: Maybe change back to having no of simulations (and also end time?) 
+        # as part of a SimulationControl class instead? And pass the end time as another argument here...
+
         # time stamps
         self.time_step = time_step
         self.time_stamp = np.arange(0, self.param_vals['end_time'], time_step)
