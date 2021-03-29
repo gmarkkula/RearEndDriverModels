@@ -3,16 +3,24 @@ import math
 from enum import Enum
 import numpy as np
 
-
+MAX_TIME_GAP = 10 # m/s
+MIN_WIDTH = 0.1 # m
+MAX_WIDTH = 10 # m
 MAX_SPEED = 50 # m/s
 MAX_TIME = 30 # s
 MAX_ACC = 10 # m/s^2
+MAX_LDT = 0.05 # rad / s
 MAX_SIMULATIONS = 10000
 
 class ParameterType(Enum):
     BOOLEAN = 0
     FLOAT = 1
     INTEGER = 2
+
+class DriverModelCapability(Enum):
+    DETECTION_TIME = 0
+    BRAKE_ONSET_TIME = 1
+    BRAKE_CTRL = 2
 
 
 class ParameterDefinition:
@@ -47,50 +55,56 @@ class Parameterizable:
     def active_preset(self):
         pass
 
-    
+
 
 class Scenario(Parameterizable):
 
     def __init__(self):
         super().__init__()
-        self.add_parameter(ParameterDefinition('v_L', 'Initial lead vehicle speed', 
+        self.add_parameter(ParameterDefinition('v_E', 'Initial speed of ego vehicle', 
             'm/s', ParameterType.FLOAT, (0, MAX_SPEED)))
-        self.add_parameter(ParameterDefinition('T_L,B', 'Lead vehicle acceleration onset time', 
+        self.add_parameter(ParameterDefinition('T_o', 'End time of ego driver off-road glance', 
             's', ParameterType.FLOAT, (0, MAX_TIME)))
-        self.add_parameter(ParameterDefinition('a_L', 'Lead vehicle acceleration magnitude', 
+        self.add_parameter(ParameterDefinition('T_g', 'Initial time gap between ego vehicle and collision partner', 
+            's', ParameterType.FLOAT, (0, MAX_TIME_GAP)))
+        self.add_parameter(ParameterDefinition('W_P', 'Width of collision partner', 
+            'm', ParameterType.FLOAT, (MIN_WIDTH, MAX_WIDTH)))
+        self.add_parameter(ParameterDefinition('v_P', 'Initial speed of collision partner', 
+            'm/s', ParameterType.FLOAT, (0, MAX_SPEED)))
+        self.add_parameter(ParameterDefinition('T_a', 'Onset time of collision partner acceleration', 
+            's', ParameterType.FLOAT, (0, MAX_TIME)))
+        self.add_parameter(ParameterDefinition('a_P', 'Acceleration magnitude of collision partner', 
             'm/s^2', ParameterType.FLOAT, (-MAX_ACC, MAX_ACC)))
-        self.add_parameter(ParameterDefinition('v_E', 'Initial ego vehicle speed', 
-            'm/s', ParameterType.FLOAT, (0, MAX_SPEED)))
-        self.add_parameter(ParameterDefinition('T_E,G', 'Ego driver off-road glance end time', 
-            's', ParameterType.FLOAT, (0, MAX_TIME)))
-        self.add_parameter(ParameterDefinition('end_time', 'Simulation end time', 's', 
-            ParameterType.FLOAT, (0, MAX_TIME)))
-        self.add_parameter(ParameterDefinition('n_simulations', 
-            'No. of simulations', '-', ParameterType.INTEGER, (0, MAX_SIMULATIONS)))
 
-    def set_time_series_vectors(self, time_step):
-        """ Sets time series vectors for the scenario, with the specified time
+
+
+    def set_time_series_arrays(self, time_step, end_time):
+        """ Sets time series arrays for the scenario, with the specified time
             step.
         """
-
-        ### NOTE: Maybe change back to having no of simulations (and also end time?) 
-        # as part of a SimulationControl class instead? And pass the end time as another argument here...
-
         # time stamps
         self.time_step = time_step
-        self.time_stamp = np.arange(0, self.param_vals['end_time'], time_step)
+        self.end_time = end_time
+        self.time_stamp = np.arange(0, end_time, time_step)
         self.n_time_steps = len(self.time_stamp)
-        # lead vehicle vectors
-        ### TODO
-        # ego vehicle vectors
-        ### TODO
-
-
-
-class DriverModelCapability(Enum):
-    DETECTION_TIME = 0
-    BRAKE_ONSET_TIME = 1
-    BRAKE_CTRL = 2
+        # ego vehicle arrays
+        self.ego_front_pos = self.time_stamp * self.param_vals['v_E']
+        self.ego_speed = np.full(self.n_time_steps, self.param_vals['v_E'])
+        self.ego_eyes_on_road = self.time_stamp >= self.param_vals['T_o']
+        # collision partner arrays
+        self.cp_acceleration = np.zeros(self.n_time_steps)
+        self.cp_acceleration[self.time_stamp >= 
+            self.param_vals['T_a']] = self.param_vals['a_P']
+        self.cp_speed = np.maximum(0, self.param_vals['v_P'] + np.cumsum(
+            self.cp_acceleration * time_step))
+        cp_rear_pos0 = self.param_vals['T_g'] * self.param_vals['v_E']
+        self.cp_rear_pos = cp_rear_pos0 + np.cumsum(self.cp_speed * time_step)
+        self.distance_gap = self.cp_rear_pos - self.ego_front_pos
+        self.speed_diff = self.cp_speed - self.ego_speed
+        # looming arrays
+        self.theta = 2 * np.arctan(self.param_vals['W_P'] / self.distance_gap)
+        self.thetaDot = -self.param_vals['W_P'] * self.speed_diff / (
+            self.distance_gap ** 2 + self.param_vals['W_P'] ** 2 / 4)
 
 
 
@@ -109,15 +123,10 @@ class DriverModel(Parameterizable):
 
         
 
-    def simulate(self, scenario):
-        # how many simulations to run?
-        if self.is_probabilistic:
-            n_simulations = scenario.param_vals['n_simulations']
-        else:
-            n_simulations = 1
+    def simulate(self, scenario, end_time, n_simulations):
         # set the time series vectors for the scenario, using the model's time step
         self.scenario = scenario
-        self.scenario.set_time_series_vectors(self.time_step)
+        self.scenario.set_time_series_arrays(self.time_step, end_time)
         # prepare the dictionary of model outputs
         self.outputs = {}
         for capab in self.capabilities:
@@ -139,17 +148,71 @@ class DriverModel(Parameterizable):
 
 
 
+
+class SimulationEngine(Parameterizable):
+
+    def __init__(self, scenario):
+        super().__init__()
+        self.add_parameter(ParameterDefinition('end_time', 'Simulation/plotting end time', 's', 
+            ParameterType.FLOAT, (0, MAX_TIME)))
+        self.add_parameter(ParameterDefinition('n_simulations', 
+            'No. of simulations (probabilistic models only)', '-', ParameterType.INTEGER, (0, MAX_SIMULATIONS)))
+
+        self.scenario = scenario
+        self.driver_models = []
+
+    def add_driver_model(self, model):
+        self.driver_models.append(model)
+
+    def simulate_driver_models(self):
+        for model in self.driver_models:
+            if model.is_probabilistic:
+                n_simulations = self.param_vals['n_simulations']
+            else:
+                n_simulations = 1
+            model.simulate(self.scenario, self.param_vals['end_time'], n_simulations)
+
+
+
+
+class FixedLDTModel(DriverModel):
+
+    def __init__(self):
+        super().__init__((DriverModelCapability.DETECTION_TIME,), 
+            is_probabilistic = False, time_step = 0.001)
+        self.add_parameter(ParameterDefinition('thetaDot_d', 'Looming detection threshold', 
+            'rad/s', ParameterType.FLOAT, (0, MAX_LDT)))
+
+    def simulate_scenario_once(self, i_simulation):
+        above_threshold_samples = np.nonzero(self.scenario.thetaDot > 
+            self.param_vals['thetaDot_d'])[0]
+        if len(above_threshold_samples) == 0:
+            detection_time = math.nan
+        else:
+            detection_time = self.scenario.time_stamp[above_threshold_samples[0]]
+        self.outputs[DriverModelCapability.DETECTION_TIME][i_simulation] = detection_time
+
+
+
+
 if __name__ == "__main__":
 
-    s = Scenario()
-    s.param_vals['v_L'] = 10
-    s.param_vals['end_time'] = 10
-    s.param_vals['n_simulations'] = 2
-    print(s.param_vals)
+    scenario = Scenario()
+    scenario.param_vals['v_E'] = 10
+    scenario.param_vals['T_g'] = 4
+    scenario.param_vals['T_o'] = 0
+    scenario.param_vals['W_P'] = 1.9
+    scenario.param_vals['v_P'] = 10
+    scenario.param_vals['T_a'] = 0
+    scenario.param_vals['a_P'] = -0.35
 
-    capabs = (DriverModelCapability.BRAKE_CTRL, DriverModelCapability.DETECTION_TIME)
-    d = DriverModel(capabs, is_probabilistic = True, time_step = 1)
-    print(d.capabilities)
-    d.simulate(s)
-    for output in d.outputs.values():
-       print(output)
+    fixed_ldt_model = FixedLDTModel()
+    fixed_ldt_model.param_vals['thetaDot_d'] = 0.002
+
+    sim_engine = SimulationEngine(scenario)
+    sim_engine.param_vals['end_time'] = 15
+    sim_engine.param_vals['n_simulations'] = 100
+    sim_engine.add_driver_model(fixed_ldt_model)
+    sim_engine.simulate_driver_models()
+
+    print(fixed_ldt_model.outputs)
