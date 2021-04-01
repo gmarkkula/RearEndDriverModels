@@ -13,13 +13,14 @@ MAX_ACC = 10 # m/s^2
 MAX_LDT = 0.05 # rad / s
 MAX_SIMULATIONS = 10000
 
-CP_COLOR = 'red'
-EGO_COLOR = 'blue'
+CP_COLOR = 'black'
+EGO_COLOR = 'gray'
 
 class ParameterType(Enum):
     BOOLEAN = 0
     FLOAT = 1
     INTEGER = 2
+    COLOR = 3
 
 class DriverModelCapability(Enum):
     DETECTION_TIME = 0
@@ -116,15 +117,19 @@ class Scenario(Parameterizable):
 
 class DriverModel(Parameterizable):
     
-    def __init__(self, name, capabilities, is_probabilistic = False, time_step = None):
+    def __init__(self, name, capabilities, is_probabilistic = False, 
+        time_step = None):
         """ capabilities: tuple of DriverModelCapability
         """
         super().__init__(name)
         self.capabilities = capabilities
         self.is_probabilistic = is_probabilistic
-        if (DriverModelCapability.BRAKE_CTRL in capabilities) and (time_step is None):
+        if (DriverModelCapability.BRAKE_CTRL in capabilities) and (
+            time_step is None):
             raise Exception('Time step needed if model is doing braking control.')
         self.time_step = time_step
+        self.add_parameter(ParameterDefinition('color', 'Plot color', None, 
+            ParameterType.COLOR))
 
         
 
@@ -185,16 +190,16 @@ class SimulationEngine(Parameterizable):
     def plot(self):
         if self.param_vals['plot_base_scenario']:
             fig, axs = plt.subplots(4, 1, sharex = True)
-            axs[0].plot(self.scenario.time_stamp, self.scenario.cp_acceleration, 
-                color = CP_COLOR)
+            axs[0].plot(self.scenario.time_stamp,  self.scenario.cp_acceleration,
+                '-', color = CP_COLOR)
             axs[1].plot(self.scenario.time_stamp, self.scenario.cp_speed, 
-                color = CP_COLOR)
+                '-', color = CP_COLOR)
             axs[1].plot(self.scenario.time_stamp, self.scenario.ego_speed, 
-                color = EGO_COLOR)
+                '--', color = EGO_COLOR)
             axs[2].plot(self.scenario.time_stamp, self.scenario.distance_gap, 
-                color = 'black')
+                '-', color = CP_COLOR)
             axs[3].plot(self.scenario.time_stamp, self.scenario.thetaDot, 
-                color = 'black')
+                '-', color = CP_COLOR)
             plt.show()
 
 
