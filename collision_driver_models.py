@@ -24,19 +24,20 @@ class DriverModelCapability(Enum):
 
 
 class ParameterDefinition:
-    def __init__(self, short_name, display_name, 
-                 param_type = ParameterType.FLOAT, param_unit = None, 
+    def __init__(self, short_name, display_name, param_unit = None, 
+                 param_type = ParameterType.FLOAT, 
                  param_range = None):
         self.short_name = short_name
         self.display_name = display_name
-        self.type = param_type
         self.unit = param_unit
+        self.type = param_type
         self.range = param_range
 
 
 class Parameterizable:
 
-    def __init__(self):
+    def __init__(self, name):
+        self.name = name
         self.param_defs = []
         self.param_vals = {}
 
@@ -60,7 +61,7 @@ class Parameterizable:
 class Scenario(Parameterizable):
 
     def __init__(self):
-        super().__init__()
+        super().__init__('Scenario')
         self.add_parameter(ParameterDefinition('v_E', 'Initial speed of ego vehicle', 
             'm/s', ParameterType.FLOAT, (0, MAX_SPEED)))
         self.add_parameter(ParameterDefinition('T_o', 'End time of ego driver off-road glance', 
@@ -111,10 +112,10 @@ class Scenario(Parameterizable):
 
 class DriverModel(Parameterizable):
     
-    def __init__(self, capabilities, is_probabilistic = False, time_step = None):
+    def __init__(self, name, capabilities, is_probabilistic = False, time_step = None):
         """ capabilities: tuple of DriverModelCapability
         """
-        super().__init__()
+        super().__init__(name)
         self.capabilities = capabilities
         self.is_probabilistic = is_probabilistic
         if (DriverModelCapability.BRAKE_CTRL in capabilities) and (time_step is None):
@@ -152,13 +153,16 @@ class DriverModel(Parameterizable):
 class SimulationEngine(Parameterizable):
 
     def __init__(self, scenario):
-        super().__init__()
+        super().__init__('Simulation control')
         self.add_parameter(ParameterDefinition('end_time', 'Simulation/plotting end time', 's', 
             ParameterType.FLOAT, (0, MAX_TIME)))
         self.add_parameter(ParameterDefinition('n_simulations', 
             'No. of simulations (probabilistic models only)', '-', ParameterType.INTEGER, (0, MAX_SIMULATIONS)))
 
         self.scenario = scenario
+        self.clear_driver_models()
+
+    def clear_driver_models(self):
         self.driver_models = []
 
     def add_driver_model(self, model):
@@ -178,7 +182,7 @@ class SimulationEngine(Parameterizable):
 class FixedLDTModel(DriverModel):
 
     def __init__(self):
-        super().__init__((DriverModelCapability.DETECTION_TIME,), 
+        super().__init__('Looming detection threshold model', (DriverModelCapability.DETECTION_TIME,), 
             is_probabilistic = False, time_step = 0.001)
         self.add_parameter(ParameterDefinition('thetaDot_d', 'Looming detection threshold', 
             'rad/s', ParameterType.FLOAT, (0, MAX_LDT)))
