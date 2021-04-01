@@ -12,6 +12,7 @@ MAX_TIME = 30 # s
 MAX_ACC = 10 # m/s^2
 MAX_LDT = 0.05 # rad / s
 MAX_SIMULATIONS = 10000
+PLOT_TIME_STEP = 0.01 # s
 
 CP_COLOR = 'black'
 EGO_COLOR = 'gray'
@@ -168,7 +169,7 @@ class SimulationEngine(Parameterizable):
         self.add_parameter(ParameterDefinition('n_simulations', 
             'No. of simulations (probabilistic models only)', '-', ParameterType.INTEGER, (0, MAX_SIMULATIONS)))
         self.add_parameter(ParameterDefinition('plot_base_scenario', 
-            'Plot base scenario (without ego driver response)', '', ParameterType.BOOLEAN), True)
+            'Plot base scenario', '', ParameterType.BOOLEAN), True)
 
         self.scenario = scenario
         self.clear_driver_models()
@@ -188,19 +189,49 @@ class SimulationEngine(Parameterizable):
             model.simulate(self.scenario, self.param_vals['end_time'], n_simulations)
 
     def plot(self):
+        self.scenario.set_time_series_arrays(PLOT_TIME_STEP, 
+            self.param_vals['end_time'])
+        # base scenario plotting
         if self.param_vals['plot_base_scenario']:
-            fig, axs = plt.subplots(4, 1, sharex = True)
+            fig, axs = plt.subplots(4, 1, sharex = True, figsize = (8, 6))
             axs[0].plot(self.scenario.time_stamp,  self.scenario.cp_acceleration,
-                '-', color = CP_COLOR)
-            axs[1].plot(self.scenario.time_stamp, self.scenario.cp_speed, 
-                '-', color = CP_COLOR)
+                '--', color = CP_COLOR)
+            axs[0].set_ylabel('Acceleration (m/s$^2$)')
             axs[1].plot(self.scenario.time_stamp, self.scenario.ego_speed, 
-                '--', color = EGO_COLOR)
+                ':', color = EGO_COLOR)
+            axs[1].plot(self.scenario.time_stamp, self.scenario.cp_speed, 
+                '--', color = CP_COLOR)
+            axs[1].set_ylabel('Speed (m/s)')
+            axs[1].legend(('ego vehicle', 'coll. partner'))
             axs[2].plot(self.scenario.time_stamp, self.scenario.distance_gap, 
                 '-', color = CP_COLOR)
+            axs[2].set_ylabel('Distance gap (m)')
             axs[3].plot(self.scenario.time_stamp, self.scenario.thetaDot, 
                 '-', color = CP_COLOR)
-            plt.show()
+            axs[3].set_xlabel('Time (s)')
+            axs[3].set_ylabel(r'$d\theta/dt$ (rad/s)')
+            axs[3].set_ylim((0, MAX_LDT))
+        # figure out what types of model capabilities to plot
+        plot_capabs = {}
+        for capab in DriverModelCapability:
+            plot_capabs[capab] = False
+        for driver_model in self.driver_models:
+            for capab in driver_model.capabilities:
+                plot_capabs[capab] = True
+        # plot detection time
+        if plot_capabs[DriverModelCapability.DETECTION_TIME]:
+            fig, ax = plt.subplots(figsize = (8, 2))
+            for driver_model in self.driver_models:
+                if capab in driver_model.capabilities:
+                    if not driver_model.is_probabilistic:
+                        ax.axvline(driver_model.outputs[
+                            DriverModelCapability.DETECTION_TIME], 
+                            color = driver_model.param_vals['color'])
+                        ax.set_xlim((0, self.param_vals['end_time']))
+        # show the plots
+        plt.show()
+        
+        
 
 
 
@@ -212,6 +243,7 @@ class FixedLDTModel(DriverModel):
             is_probabilistic = False, time_step = 0.001)
         self.add_parameter(ParameterDefinition('thetaDot_d', 'Looming detection threshold', 
             'rad/s', ParameterType.FLOAT, (0, MAX_LDT)))
+        self.param_vals['color'] = 'magenta'
 
     def simulate_scenario_once(self, i_simulation):
         above_threshold_samples = np.nonzero(self.scenario.thetaDot > 
