@@ -2,6 +2,7 @@
 import math
 from enum import Enum
 import numpy as np
+import matplotlib.pyplot as plt
 
 MAX_TIME_GAP = 10 # m/s
 MIN_WIDTH = 0.1 # m
@@ -11,6 +12,9 @@ MAX_TIME = 30 # s
 MAX_ACC = 10 # m/s^2
 MAX_LDT = 0.05 # rad / s
 MAX_SIMULATIONS = 10000
+
+CP_COLOR = 'red'
+EGO_COLOR = 'blue'
 
 class ParameterType(Enum):
     BOOLEAN = 0
@@ -153,11 +157,13 @@ class DriverModel(Parameterizable):
 class SimulationEngine(Parameterizable):
 
     def __init__(self, scenario):
-        super().__init__('Simulation control')
+        super().__init__('Simulation/plotting')
         self.add_parameter(ParameterDefinition('end_time', 'Simulation/plotting end time', 's', 
             ParameterType.FLOAT, (0, MAX_TIME)))
         self.add_parameter(ParameterDefinition('n_simulations', 
             'No. of simulations (probabilistic models only)', '-', ParameterType.INTEGER, (0, MAX_SIMULATIONS)))
+        self.add_parameter(ParameterDefinition('plot_base_scenario', 
+            'Plot base scenario (without ego driver response)', '', ParameterType.BOOLEAN), True)
 
         self.scenario = scenario
         self.clear_driver_models()
@@ -175,6 +181,21 @@ class SimulationEngine(Parameterizable):
             else:
                 n_simulations = 1
             model.simulate(self.scenario, self.param_vals['end_time'], n_simulations)
+
+    def plot(self):
+        if self.param_vals['plot_base_scenario']:
+            fig, axs = plt.subplots(4, 1, sharex = True)
+            axs[0].plot(self.scenario.time_stamp, self.scenario.cp_acceleration, 
+                color = CP_COLOR)
+            axs[1].plot(self.scenario.time_stamp, self.scenario.cp_speed, 
+                color = CP_COLOR)
+            axs[1].plot(self.scenario.time_stamp, self.scenario.ego_speed, 
+                color = EGO_COLOR)
+            axs[2].plot(self.scenario.time_stamp, self.scenario.distance_gap, 
+                color = 'black')
+            axs[3].plot(self.scenario.time_stamp, self.scenario.thetaDot, 
+                color = 'black')
+            plt.show()
 
 
 
