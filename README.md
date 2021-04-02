@@ -7,6 +7,10 @@ To do:
     * ~~Fixed looming detection threshold~~
     * ~~(Maddox and Kiefer, 2012)~~
     * (Markkula et al, 2016)
+        * ~~Parameters and presets~~
+        * Model outputs
+        * Plotting brake onset time for probabilistic models
+        * Plotting brake control
     * (Svärd et al, 2020)
     * (Markkula et al, 2020)
 * Low prio: 

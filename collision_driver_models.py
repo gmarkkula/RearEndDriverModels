@@ -11,6 +11,7 @@ MAX_SPEED = 50 # m/s
 MAX_TIME = 30 # s
 MAX_ACC = 10 # m/s^2
 MAX_LDT = 0.05 # rad / s
+MAX_INVTAU = 1 # 1/s
 MAX_PRT = 3 # s
 MAX_SIMULATIONS = 10000
 PLOT_TIME_STEP = 0.01 # s
@@ -113,7 +114,7 @@ class Scenario(Parameterizable):
         self.add_parameter(ParameterDefinition('T_a', 'Onset time of collision partner acceleration', 
             's', ParameterType.FLOAT, (0, MAX_TIME)))
         self.add_parameter(ParameterDefinition('a_P', 'Acceleration magnitude of collision partner', 
-            'm/s^2', ParameterType.FLOAT, (-MAX_ACC, MAX_ACC)))
+            'm/s²', ParameterType.FLOAT, (-MAX_ACC, MAX_ACC)))
 
 
 
@@ -130,6 +131,11 @@ class Scenario(Parameterizable):
         self.ego_front_pos = self.time_stamp * self.param_vals['v_E']
         self.ego_speed = np.full(self.n_time_steps, self.param_vals['v_E'])
         self.ego_eyes_on_road = self.time_stamp >= self.param_vals['T_o']
+        ego_eyes_on_road_samples = np.nonzero(self.ego_eyes_on_road)[0]
+        if len(ego_eyes_on_road_samples):
+            self.ego_eyes_on_road_sample = math.nan
+        else:
+            self.ego_eyes_on_road_sample = ego_eyes_on_road_samples[0]
         # collision partner arrays
         self.cp_acceleration = np.zeros(self.n_time_steps)
         self.cp_acceleration[self.time_stamp >= 
@@ -144,6 +150,7 @@ class Scenario(Parameterizable):
         self.theta = 2 * np.arctan(self.param_vals['W_P'] / self.distance_gap)
         self.thetaDot = -self.param_vals['W_P'] * self.speed_diff / (
             self.distance_gap ** 2 + self.param_vals['W_P'] ** 2 / 4)
+        self.invTau = self.thetaDot / self.theta
 
 
 
@@ -225,7 +232,7 @@ class SimulationEngine(Parameterizable):
             self.param_vals['end_time'])
         # base scenario plotting
         if self.param_vals['plot_base_scenario']:
-            fig, axs = plt.subplots(4, 1, sharex = True, figsize = (8, 6))
+            fig, axs = plt.subplots(6, 1, sharex = True, figsize = (8, 8))
             axs[0].plot(self.scenario.time_stamp,  self.scenario.cp_acceleration,
                 '--', color = CP_COLOR)
             axs[0].set_ylabel('Acceleration (m/s$^2$)')
@@ -240,9 +247,16 @@ class SimulationEngine(Parameterizable):
             axs[2].set_ylabel('Distance gap (m)')
             axs[3].plot(self.scenario.time_stamp, self.scenario.thetaDot, 
                 '-', color = CP_COLOR)
-            axs[3].set_xlabel('Time (s)')
             axs[3].set_ylabel(r'$d\theta/dt$ (rad/s)')
             axs[3].set_ylim((0, MAX_LDT))
+            axs[4].plot(self.scenario.time_stamp, self.scenario.invTau, 
+                '-', color = CP_COLOR)
+            axs[4].set_ylabel(r'$\tau^{-1}$ (s$^{-1}$)')
+            axs[4].set_ylim((0, MAX_INVTAU))
+            axs[5].plot(self.scenario.time_stamp, self.scenario.ego_eyes_on_road, 
+                ':', color = EGO_COLOR)
+            axs[5].set_ylabel('Eyes on road (-)')
+            axs[5].set_xlabel('Time (s)')
         # figure out what types of model capabilities to plot
         plot_capabs = {}
         for capab in DriverModelCapability:
@@ -323,6 +337,44 @@ class MaddoxAndKiefer2012Model(DriverModel):
         self.outputs[DriverModelCapability.DETECTION_TIME][i_simulation] = detection_time
         self.outputs[DriverModelCapability.BRAKE_ONSET_TIME][i_simulation] = (
             detection_time + self.param_vals['PRT'])
+
+
+
+class MarkkulaEtAl2016Model(DriverModel):
+
+    def __init__(self):
+        super().__init__('Markkula et al. (2016)', 
+            (DriverModelCapability.BRAKE_ONSET_TIME, 
+            DriverModelCapability.BRAKE_CTRL), 
+            is_probabilistic = True, time_step = 0.01, plot_color = 'orange')
+        self.add_parameter(ParameterDefinition('mu_alpha_on', r'$\alpha_B$ eyes on threat: $\mu$', 
+            '-', ParameterType.FLOAT, (-10, 10)))
+        self.add_parameter(ParameterDefinition('sigma_alpha_on', r'$\alpha_B$ eyes on threat: $\sigma$', 
+            '-', ParameterType.FLOAT, (-10, 10)))
+        self.add_parameter(ParameterDefinition('mu_alpha_off', r'$\alpha_B$ eyes off threat: $\mu$', 
+            '-', ParameterType.FLOAT, (-10, 10)))
+        self.add_parameter(ParameterDefinition('sigma_alpha_off', r'$\alpha_B$ eyes off threat: $\sigma$', 
+            '-', ParameterType.FLOAT, (-10, 10)))
+        self.add_parameter(ParameterDefinition('mu_k', r'$k_B$: $\mu$', 
+            'g', ParameterType.FLOAT, (-10, 10)))
+        self.add_parameter(ParameterDefinition('sigma_k', r'$k_B$: $\sigma$', 
+            'g', ParameterType.FLOAT, (-10, 10)))
+        self.add_parameter(ParameterDefinition('mu_a', r'$a_1$: $\mu$', 
+            'm/s²', ParameterType.FLOAT, (-10, 10)))
+        self.add_parameter(ParameterDefinition('sigma_a', r'$a_1$: $\sigma$', 
+            'm/s²', ParameterType.FLOAT, (-10, 10)))
+        self.add_preset(PresetParameters('SHRP 2 car near-crashes/crashes', 
+            {'mu_alpha_on': 0.22, 'sigma_alpha_on': 0.29, 
+            'mu_alpha_off': -1.40, 'sigma_alpha_off': 0.71,
+            'mu_k': 1.23, 'sigma_k': 0.62, 'mu_a': -6.68, 'sigma_a': 1.69}))
+        self.add_preset(PresetParameters('SHRP 2 truck/bus near-crashes/crashes', 
+            {'mu_alpha_on': 0.27, 'sigma_alpha_on': 0.40, 
+            'mu_alpha_off': -0.51, 'sigma_alpha_off': 0.85,
+            'mu_k': 0.84, 'sigma_k': 1.44, 'mu_a': -4.70, 'sigma_a': 1.44}))
+        self.choose_preset('SHRP 2 car near-crashes/crashes')
+
+    def simulate_scenario_once(self, i_simulation):
+        pass
 
 
 
