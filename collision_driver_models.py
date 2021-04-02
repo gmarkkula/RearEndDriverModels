@@ -11,6 +11,7 @@ MAX_SPEED = 50 # m/s
 MAX_TIME = 30 # s
 MAX_ACC = 10 # m/s^2
 MAX_LDT = 0.05 # rad / s
+MAX_PRT = 3 # s
 MAX_SIMULATIONS = 10000
 PLOT_TIME_STEP = 0.01 # s
 
@@ -40,24 +41,55 @@ class ParameterDefinition:
         self.range = param_range
 
 
+class PresetParameters:
+    def __init__(self, display_name, preset_param_vals):
+        """ preset_param_vals should be a dict with parameter short_names as 
+            keys.
+        """
+        self.display_name = display_name
+        self.param_vals = preset_param_vals
+
+
 class Parameterizable:
 
     def __init__(self, name):
         self.name = name
         self.param_defs = []
         self.param_vals = {}
+        self.presets = []
+
 
     def add_parameter(self, param_def, param_val = None):
         self.param_defs.append(param_def)
         self.param_vals[param_def.short_name] = param_val        
 
-    def add_preset(self, short_name, display_name, preset_param_vals):
-        """ preset_dict is a dict of parameter short_name:s and values
+    def add_preset(self, preset):
+        """ preset_dict is a dict of parameter short_name:s and values.
+            NB: it will never be checked whether the preset sets all the
+            "important" values of the parameterizable, and it will only be
+            checked at choose_preset() time whether all the short_name:s in 
+            the provided preset is actually among the Parameterizable's 
+            parameters
         """
-        pass
+        self.presets.append(preset)
 
-    def choose_preset(self, preset_id = 0):
-        pass
+    def choose_preset(self, preset_id):
+        """ preset_id can either be an integer index or a display name string
+        """
+        # figure out which preset is being requested
+        if type(preset_id) is int:
+            preset = self.presets[preset_id]
+        else:
+            found_it = False
+            for preset in self.presets:
+                if preset.display_name == preset_id:
+                    found_it = True
+                    break
+            if not found_it:
+                raise Exception('No preset with display name "' + preset + '".')
+        # set parameter values from preset
+        for short_name in preset.param_vals.keys():
+            self.param_vals[short_name] = preset.param_vals[short_name]
 
     def active_preset(self):
         pass
@@ -119,7 +151,7 @@ class Scenario(Parameterizable):
 class DriverModel(Parameterizable):
     
     def __init__(self, name, capabilities, is_probabilistic = False, 
-        time_step = None):
+        time_step = None, plot_color = 'black'):
         """ capabilities: tuple of DriverModelCapability
         """
         super().__init__(name)
@@ -130,7 +162,7 @@ class DriverModel(Parameterizable):
             raise Exception('Time step needed if model is doing braking control.')
         self.time_step = time_step
         self.add_parameter(ParameterDefinition('color', 'Plot color', None, 
-            ParameterType.COLOR))
+            ParameterType.COLOR), plot_color)
 
         
 
@@ -222,7 +254,7 @@ class SimulationEngine(Parameterizable):
         if plot_capabs[DriverModelCapability.DETECTION_TIME]:
             fig, ax = plt.subplots(figsize = (8, 2))
             for driver_model in self.driver_models:
-                if capab in driver_model.capabilities:
+                if DriverModelCapability.DETECTION_TIME in driver_model.capabilities:
                     if not driver_model.is_probabilistic:
                         ax.axvline(driver_model.outputs[
                             DriverModelCapability.DETECTION_TIME], 
@@ -240,11 +272,9 @@ class FixedLDTModel(DriverModel):
 
     def __init__(self):
         super().__init__('Looming detection threshold model', (DriverModelCapability.DETECTION_TIME,), 
-            is_probabilistic = False, time_step = 0.001)
+            is_probabilistic = False, time_step = 0.001, plot_color = 'magenta')
         self.add_parameter(ParameterDefinition('thetaDot_d', 'Looming detection threshold', 
             'rad/s', ParameterType.FLOAT, (0, MAX_LDT)))
-        self.param_vals['color'] = 'magenta'
-
     def simulate_scenario_once(self, i_simulation):
         above_threshold_samples = np.nonzero(self.scenario.thetaDot > 
             self.param_vals['thetaDot_d'])[0]
@@ -254,6 +284,34 @@ class FixedLDTModel(DriverModel):
             detection_time = self.scenario.time_stamp[above_threshold_samples[0]]
         self.outputs[DriverModelCapability.DETECTION_TIME][i_simulation] = detection_time
 
+
+
+class MaddoxAndKiefer2012Model(DriverModel):
+
+    def __init__(self):
+        super().__init__('Maddox and Kiefer (2012)', 
+            (DriverModelCapability.DETECTION_TIME, 
+            DriverModelCapability.BRAKE_ONSET_TIME), 
+            is_probabilistic = False, time_step = 0.001, plot_color = 'red')
+        self.add_parameter(ParameterDefinition('thetaDot_d', 'Looming detection threshold', 
+            'rad/s', ParameterType.FLOAT, (0, MAX_LDT)))
+        self.add_parameter(ParameterDefinition('PRT', 'Perception-reaction time', 
+            's', ParameterType.FLOAT, (0, MAX_LDT)))
+        self.add_preset(PresetParameters('Low PRT', {'thetaDot_d': 0.0397, 'PRT': 0.75}))
+        self.add_preset(PresetParameters('Mid PRT', {'thetaDot_d': 0.0174, 'PRT': 1.5}))
+        self.add_preset(PresetParameters('High PRT', {'thetaDot_d': 0.0117, 'PRT': 2}))
+        self.choose_preset('Mid PRT')
+
+    def simulate_scenario_once(self, i_simulation):
+        above_threshold_samples = np.nonzero(self.scenario.thetaDot > 
+            self.param_vals['thetaDot_d'])[0]
+        if len(above_threshold_samples) == 0:
+            detection_time = math.nan
+        else:
+            detection_time = self.scenario.time_stamp[above_threshold_samples[0]]
+        self.outputs[DriverModelCapability.DETECTION_TIME][i_simulation] = detection_time
+        self.outputs[DriverModelCapability.BRAKE_ONSET_TIME][i_simulation] = (
+            detection_time + self.param_vals['PRT'])
 
 
 
@@ -271,10 +329,13 @@ if __name__ == "__main__":
     fixed_ldt_model = FixedLDTModel()
     fixed_ldt_model.param_vals['thetaDot_d'] = 0.002
 
+    mk2012_model = MaddoxAndKiefer2012Model()
+
+
     sim_engine = SimulationEngine(scenario)
     sim_engine.param_vals['end_time'] = 15
     sim_engine.param_vals['n_simulations'] = 100
     sim_engine.add_driver_model(fixed_ldt_model)
+    sim_engine.add_driver_model(mk2012_model)
     sim_engine.simulate_driver_models()
-
-    print(fixed_ldt_model.outputs)
+    sim_engine.plot()
