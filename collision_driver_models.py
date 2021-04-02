@@ -250,16 +250,23 @@ class SimulationEngine(Parameterizable):
         for driver_model in self.driver_models:
             for capab in driver_model.capabilities:
                 plot_capabs[capab] = True
-        # plot detection time
-        if plot_capabs[DriverModelCapability.DETECTION_TIME]:
-            fig, ax = plt.subplots(figsize = (8, 2))
-            for driver_model in self.driver_models:
-                if DriverModelCapability.DETECTION_TIME in driver_model.capabilities:
-                    if not driver_model.is_probabilistic:
-                        ax.axvline(driver_model.outputs[
-                            DriverModelCapability.DETECTION_TIME], 
-                            color = driver_model.param_vals['color'])
-                        ax.set_xlim((0, self.param_vals['end_time']))
+        # plot detection time and brake onset time
+        for time_capab in (DriverModelCapability.DETECTION_TIME, 
+            DriverModelCapability.BRAKE_ONSET_TIME):
+            if plot_capabs[time_capab]:
+                fig, ax = plt.subplots(figsize = (8, 2))
+                for driver_model in self.driver_models:
+                    if time_capab in driver_model.capabilities:
+                        if not driver_model.is_probabilistic:
+                            ax.axvline(driver_model.outputs[time_capab], 
+                                color = driver_model.param_vals['color'])
+                            ax.set_xlim((0, self.param_vals['end_time']))
+                if time_capab == DriverModelCapability.DETECTION_TIME:
+                    ax.set_xlabel('Detection time (s)')
+                else:
+                    ax.set_xlabel('Brake onset time (s)')
+                fig.set_tight_layout(True)
+
         # show the plots
         plt.show()
         
@@ -275,6 +282,10 @@ class FixedLDTModel(DriverModel):
             is_probabilistic = False, time_step = 0.001, plot_color = 'magenta')
         self.add_parameter(ParameterDefinition('thetaDot_d', 'Looming detection threshold', 
             'rad/s', ParameterType.FLOAT, (0, MAX_LDT)))
+        self.add_preset(PresetParameters('Hoffman and Mortimer (1994)', {'thetaDot_d': 0.003}))
+        self.add_preset(PresetParameters('Markkula et al. (2020)', {'thetaDot_d': 0.002}))
+        self.choose_preset('Hoffman and Mortimer (1994)')
+
     def simulate_scenario_once(self, i_simulation):
         above_threshold_samples = np.nonzero(self.scenario.thetaDot > 
             self.param_vals['thetaDot_d'])[0]
@@ -296,7 +307,7 @@ class MaddoxAndKiefer2012Model(DriverModel):
         self.add_parameter(ParameterDefinition('thetaDot_d', 'Looming detection threshold', 
             'rad/s', ParameterType.FLOAT, (0, MAX_LDT)))
         self.add_parameter(ParameterDefinition('PRT', 'Perception-reaction time', 
-            's', ParameterType.FLOAT, (0, MAX_LDT)))
+            's', ParameterType.FLOAT, (0, MAX_PRT)))
         self.add_preset(PresetParameters('Low PRT', {'thetaDot_d': 0.0397, 'PRT': 0.75}))
         self.add_preset(PresetParameters('Mid PRT', {'thetaDot_d': 0.0174, 'PRT': 1.5}))
         self.add_preset(PresetParameters('High PRT', {'thetaDot_d': 0.0117, 'PRT': 2}))
@@ -330,7 +341,6 @@ if __name__ == "__main__":
     fixed_ldt_model.param_vals['thetaDot_d'] = 0.002
 
     mk2012_model = MaddoxAndKiefer2012Model()
-
 
     sim_engine = SimulationEngine(scenario)
     sim_engine.param_vals['end_time'] = 15
