@@ -2,8 +2,10 @@
 import math
 from enum import Enum
 import numpy as np
+from numpy.random import default_rng
 import matplotlib.pyplot as plt
 
+G = 9.82 # m/s^2
 MAX_TIME_GAP = 10 # m/s
 MIN_WIDTH = 0.1 # m
 MAX_WIDTH = 10 # m
@@ -96,31 +98,54 @@ class Parameterizable:
         pass
 
 
-class CollisionPartnerTimeSeries:
-    def __init__(self, n_time_steps):
-        self.acceleration = np.full(n_time_steps, math.nan)
-        self.speed = np.full(n_time_steps, math.nan)
-        self.rear_pos = np.full(n_time_steps, math.nan)
-
-
-class EgoVehicleTimeSeries:
-    def __init__(self, n_time_steps, n_simulations):
-        if n_simulations == 1:
-            nan_array = np.full(n_time_steps, math.nan)
-        else:
-            nan_array = np.full((n_simulations, n_time_steps))
+class RoadUserTimeSeries:
+    def __init__(self, x0, v0, time_step, time_stamp, n_simulations):
+        self.x0 = x0
+        self.v0 = v0
+        self.time_step = time_step
+        self.time_stamp = time_stamp
+        self.n_time_steps = len(time_stamp)
+        self.n_simulations = n_simulations
+        nan_array = np.full((n_simulations, self.n_time_steps), math.nan)
         self.acceleration = np.copy(nan_array)
         self.speed = np.copy(nan_array)
-        self.front_pos = np.copy(nan_array)
+        self.pos = np.copy(nan_array)
+    def set_kinematics_arrays_from_acc(self, i_simulation = 0):
+        """ Assumes the member acceleration[i_simulation,] has been set, and 
+            calculates corresponding slices [i_simulation,] of members
+            speed and pos from it
+        """ 
+        self.speed[i_simulation] = self.v0 + np.cumsum(
+            self.acceleration[i_simulation,] * self.time_step)
+        self.speed[i_simulation,] = np.maximum(0, self.speed[i_simulation,]) # no reversing
+        self.pos[i_simulation,] = self.x0 + np.cumsum(
+            self.speed[i_simulation,] * self.time_step)   
+
+
+class EgoVehicleTimeSeries(RoadUserTimeSeries):
+    def __init__(self, x0, v0, time_step, time_stamp, n_simulations):
+        super().__init__(x0, v0, time_step, time_stamp, n_simulations)
+        nan_array = np.full((n_simulations, self.n_time_steps), math.nan)
         self.eyes_on_road = np.copy(nan_array)
         self.distance_gap = np.copy(nan_array)
         self.speed_diff = np.copy(nan_array)
         self.theta = np.copy(nan_array)
         self.thetaDot = np.copy(nan_array)
         self.invTau = np.copy(nan_array)
+    def set_kinematics_arrays_from_acc(self, cp_time_series, i_simulation = 0):
+        """ Assumes member array acceleration[i_simulation,] has been set, and 
+            calculates corresponding slices [i_simulation,] of members
+            speed, pos, distance_gap, speed_diff from the acceleration and 
+            the provided cp_time_series RoadUserTimeSeries object
+        """ 
+        super().set_kinematics_arrays_from_acc(i_simulation)
+        assert(cp_time_series.n_simulations == 1)
+        self.distance_gap[i_simulation,] = cp_time_series.pos - self.pos[i_simulation,]
+        self.speed_diff[i_simulation,] = cp_time_series.speed - self.speed[i_simulation,]
     def set_looming_arrays(self, cp_width):
-        """ Assumes the members distance_gap and speed_diff have already been
-            set, and calculates theta, thetaDot and invTau from these
+        """ Assumes the member arrays distance_gap and speed_diff have already been
+            completely set (across all individual simulations), and calculates 
+            theta, thetaDot and invTau from these
         """
         self.theta = 2 * np.arctan(cp_width / self.distance_gap)
         self.thetaDot = -cp_width * self.speed_diff / (
@@ -146,6 +171,19 @@ class Scenario(Parameterizable):
             's', ParameterType.FLOAT, (0, MAX_TIME)))
         self.add_parameter(ParameterDefinition('a_P', 'Acceleration magnitude of collision partner', 
             'm/s²', ParameterType.FLOAT, (-MAX_ACC, MAX_ACC)))
+        self.add_preset(PresetParameters('Eyes-on-threat example (stationary lead vehicle)', 
+            {'v_E': 80 / 3.6, 'T_o': 0, 'T_g': 7, 'W_P': 1.8, 
+            'v_P': 0, 'T_a': 0, 'a_P': 0}))
+        self.add_preset(PresetParameters('Eyes-off-threat example (close following while distracted)', 
+            {'v_E': 110 / 3.6, 'T_o': 0.5, 'T_g': 1.5, 'W_P': 1.8, 
+            'v_P': 110 / 3.6, 'T_a': 0, 'a_P': -6}))
+        self.add_preset(PresetParameters('Lamble et al. (1999) looming detection from 20 m', 
+            {'v_E': 50 / 3.6, 'T_o': 0, 'T_g': 20 / (50/3.6), 'W_P': 1., 
+            'v_P': 50 / 3.6, 'T_a': 0, 'a_P': 0.7}))
+        self.add_preset(PresetParameters('Lamble et al. (1999) looming detection from 40 m', 
+            {'v_E': 50 / 3.6, 'T_o': 0, 'T_g': 40 / (50/3.6), 'W_P': 1.8, 
+            'v_P': 50 / 3.6, 'T_a': 0, 'a_P': 0.7}))
+        self.choose_preset(0)
 
 
 
@@ -159,28 +197,23 @@ class Scenario(Parameterizable):
         self.time_stamp = np.arange(0, end_time, time_step)
         self.n_time_steps = len(self.time_stamp)       
         # collision partner arrays
-        self.cp = CollisionPartnerTimeSeries(self.n_time_steps) 
-        self.cp.acceleration = np.zeros(self.n_time_steps)
-        self.cp.acceleration[self.time_stamp >= 
+        dgap0 = self.param_vals['T_g'] * self.param_vals['v_E']
+        self.cp = RoadUserTimeSeries(x0 = dgap0, v0 = self.param_vals['v_P'],
+            time_step = self.time_step, time_stamp = self.time_stamp, 
+            n_simulations = 1) 
+        self.cp.acceleration[0,] = np.zeros(self.n_time_steps)
+        self.cp.acceleration[0, self.time_stamp >= 
             self.param_vals['T_a']] = self.param_vals['a_P']
-        self.cp.speed = np.maximum(0, self.param_vals['v_P'] + np.cumsum(
-            self.cp.acceleration * time_step))
-        cp_rear_pos0 = self.param_vals['T_g'] * self.param_vals['v_E']
-        self.cp.rear_pos = cp_rear_pos0 + np.cumsum(self.cp.speed * time_step)
+        self.cp.set_kinematics_arrays_from_acc()
         # ego vehicle arrays
-        self.ego = EgoVehicleTimeSeries(self.n_time_steps, 1)
-        self.ego.front_pos = self.time_stamp * self.param_vals['v_E']
-        self.ego.speed = np.full(self.n_time_steps, self.param_vals['v_E'])
-        self.ego.eyes_on_road = self.time_stamp >= self.param_vals['T_o']
-        self.ego.distance_gap = self.cp.rear_pos - self.ego.front_pos
-        self.ego.speed_diff = self.cp.speed - self.ego.speed
+        self.ego = EgoVehicleTimeSeries(x0 = 0, v0 = self.param_vals['v_E'], 
+            time_step = self.time_step, time_stamp = self.time_stamp, 
+            n_simulations = 1)
+        self.ego.eyes_on_road[0,] = self.time_stamp >= self.param_vals['T_o']
+        self.ego.acceleration[0,] = np.zeros(self.n_time_steps)
+        self.ego.set_kinematics_arrays_from_acc(cp_time_series = self.cp)
         self.ego.set_looming_arrays(self.param_vals['W_P'])
-        # add info on first eyes on road sample
-        ego_eyes_on_road_samples = np.nonzero(self.ego.eyes_on_road)[0]
-        if len(ego_eyes_on_road_samples):
-            self.ego.eyes_on_road_sample = math.nan
-        else:
-            self.ego.eyes_on_road_sample = ego_eyes_on_road_samples[0]
+
 
 
 
@@ -207,21 +240,26 @@ class DriverModel(Parameterizable):
         # set the time series vectors for the scenario, using the model's time step
         self.scenario = scenario
         self.scenario.set_time_series_arrays(self.time_step, end_time)
+        self.time_stamp = scenario.time_stamp
         # prepare the dictionary of model outputs
         self.outputs = {}
         for capab in self.capabilities:
             if capab == DriverModelCapability.BRAKE_CTRL:
-                self.outputs[capab] = np.full(
-                    (n_simulations, self.scenario.n_time_steps), math.nan)
+                self.outputs[capab] = EgoVehicleTimeSeries(
+                    self.scenario.ego.x0, self.scenario.ego.v0, 
+                    self.scenario.time_step, self.scenario.time_stamp, 
+                    n_simulations)
             else:
                 self.outputs[capab] = np.full(n_simulations, math.nan)
-        # do any other preparations needed before running individual simulations
-        self.prepare_simulation()
+        # run any code needed before running individual simulations
+        self.before_simulations()
         # run the simulations
         for i in range(n_simulations):
             self.simulate_scenario_once(i)
+        # run any code needed after running individual simulations
+        self.after_simulations()
 
-    def prepare_simulation(self):
+    def before_simulations(self):
         """ To be overridden if needed.
         """
         pass
@@ -233,6 +271,10 @@ class DriverModel(Parameterizable):
         """
         pass
 
+    def after_simulations(self):
+        """ To be overridden if needed.
+        """
+        pass
 
 
 
@@ -270,27 +312,27 @@ class SimulationEngine(Parameterizable):
         # base scenario plotting
         if self.param_vals['plot_base_scenario']:
             fig, axs = plt.subplots(6, 1, sharex = True, figsize = (8, 8))
-            axs[0].plot(self.scenario.time_stamp,  self.scenario.cp.acceleration,
+            axs[0].plot(self.scenario.time_stamp,  self.scenario.cp.acceleration.T,
                 '--', color = CP_COLOR)
             axs[0].set_ylabel('Acceleration (m/s$^2$)')
-            axs[1].plot(self.scenario.time_stamp, self.scenario.ego.speed, 
+            axs[1].plot(self.scenario.time_stamp, self.scenario.ego.speed.T, 
                 ':', color = EGO_COLOR)
-            axs[1].plot(self.scenario.time_stamp, self.scenario.cp.speed, 
+            axs[1].plot(self.scenario.time_stamp, self.scenario.cp.speed.T, 
                 '--', color = CP_COLOR)
             axs[1].set_ylabel('Speed (m/s)')
             axs[1].legend(('ego vehicle', 'coll. partner'))
-            axs[2].plot(self.scenario.time_stamp, self.scenario.ego.distance_gap, 
+            axs[2].plot(self.scenario.time_stamp, self.scenario.ego.distance_gap.T, 
                 '-', color = CP_COLOR)
             axs[2].set_ylabel('Distance gap (m)')
-            axs[3].plot(self.scenario.time_stamp, self.scenario.ego.thetaDot, 
+            axs[3].plot(self.scenario.time_stamp, self.scenario.ego.thetaDot.T, 
                 '-', color = CP_COLOR)
             axs[3].set_ylabel(r'$d\theta/dt$ (rad/s)')
             axs[3].set_ylim((0, MAX_LDT))
-            axs[4].plot(self.scenario.time_stamp, self.scenario.ego.invTau, 
+            axs[4].plot(self.scenario.time_stamp, self.scenario.ego.invTau.T, 
                 '-', color = CP_COLOR)
             axs[4].set_ylabel(r'$\tau^{-1}$ (s$^{-1}$)')
             axs[4].set_ylim((0, MAX_INVTAU))
-            axs[5].plot(self.scenario.time_stamp, self.scenario.ego.eyes_on_road, 
+            axs[5].plot(self.scenario.time_stamp, self.scenario.ego.eyes_on_road.T, 
                 ':', color = EGO_COLOR)
             axs[5].set_ylabel('Eyes on road (-)')
             axs[5].set_xlabel('Time (s)')
@@ -308,15 +350,49 @@ class SimulationEngine(Parameterizable):
                 fig, ax = plt.subplots(figsize = (8, 2))
                 for driver_model in self.driver_models:
                     if time_capab in driver_model.capabilities:
-                        if not driver_model.is_probabilistic:
+                        if driver_model.is_probabilistic:
+                            ax.hist(driver_model.outputs[time_capab], 
+                                color = driver_model.param_vals['color'])
+                        else:
                             ax.axvline(driver_model.outputs[time_capab], 
                                 color = driver_model.param_vals['color'])
-                            ax.set_xlim((0, self.param_vals['end_time']))
+                        ax.set_xlim((0, self.param_vals['end_time']))
+                        ax.set_ylabel(' ')
                 if time_capab == DriverModelCapability.DETECTION_TIME:
                     ax.set_xlabel('Detection time (s)')
                 else:
                     ax.set_xlabel('Brake onset time (s)')
                 fig.set_tight_layout(True)
+        # plot braking control
+        if plot_capabs[DriverModelCapability.BRAKE_CTRL]:
+            fig, axs = plt.subplots(4, 1, sharex = True, figsize = (8, 6))
+            for driver_model in self.driver_models:
+                if DriverModelCapability.BRAKE_CTRL in driver_model.capabilities:
+                    model_ctrl = driver_model.outputs[DriverModelCapability.BRAKE_CTRL]
+                    n_simulations = np.shape(model_ctrl.acceleration)[0]
+                    for i in range(n_simulations):
+                        coll_samples = np.nonzero(model_ctrl.distance_gap[i,] <= 0)[0]
+                        if len(coll_samples) == 0:
+                            idxs = np.arange(len(driver_model.time_stamp))
+                        else:
+                            idxs = np.arange(coll_samples[0])
+                        axs[0].plot(driver_model.time_stamp[idxs], 
+                            model_ctrl.acceleration[i,idxs], alpha = 0.1,
+                            color = driver_model.param_vals['color'])
+                        axs[1].plot(driver_model.time_stamp[idxs], 
+                            model_ctrl.speed[i,idxs], alpha = 0.1,
+                            color = driver_model.param_vals['color'])
+                        axs[2].plot(driver_model.time_stamp[idxs], 
+                            model_ctrl.distance_gap[i,idxs], alpha = 0.1,
+                            color = driver_model.param_vals['color'])
+                        axs[3].plot(driver_model.time_stamp[idxs], 
+                            model_ctrl.invTau[i,idxs], alpha = 0.1,
+                            color = driver_model.param_vals['color'])
+            axs[0].set_ylabel('Acceleration (m/s$^2$)')
+            axs[1].set_ylabel('Speed (m/s)')
+            axs[2].set_ylabel('Distance gap (m)')
+            axs[3].set_ylabel(r'$\tau^{-1}$ (s$^{-1}$)')
+            axs[3].set_xlabel('Time (s)')
 
         # show the plots
         plt.show()
@@ -338,7 +414,7 @@ class FixedLDTModel(DriverModel):
         self.choose_preset('Hoffman and Mortimer (1994)')
 
     def simulate_scenario_once(self, i_simulation):
-        above_threshold_samples = np.nonzero(self.scenario.ego.thetaDot > 
+        above_threshold_samples = np.nonzero(self.scenario.ego.thetaDot[0,] > 
             self.param_vals['thetaDot_d'])[0]
         if len(above_threshold_samples) == 0:
             detection_time = math.nan
@@ -365,7 +441,7 @@ class MaddoxAndKiefer2012Model(DriverModel):
         self.choose_preset('Mid PRT')
 
     def simulate_scenario_once(self, i_simulation):
-        above_threshold_samples = np.nonzero(self.scenario.ego.thetaDot > 
+        above_threshold_samples = np.nonzero(self.scenario.ego.thetaDot[0,] > 
             self.param_vals['thetaDot_d'])[0]
         if len(above_threshold_samples) == 0:
             detection_time = math.nan
@@ -410,24 +486,71 @@ class MarkkulaEtAl2016Model(DriverModel):
             'mu_k': 0.84, 'sigma_k': 1.44, 'mu_a': -4.70, 'sigma_a': 1.44}))
         self.choose_preset('SHRP 2 car near-crashes/crashes')
 
-    def prepare_simulation(self):
+    def before_simulations(self):
         # determine if the scenario is eyes-on-threat or eyes-off-threat
-        pass
+        eyes_on_road_samples = np.nonzero(self.scenario.ego.eyes_on_road[0,])[0]
+        if len(eyes_on_road_samples) == 0:
+            raise Exception(
+                'Eyes off road throughout scenario - not supported by this implementation of the Markkula et al. (2016) model.')
+        eyes_on_road_sample = eyes_on_road_samples[0]
+        self.is_eyes_on_threat = self.scenario.ego.invTau[0, eyes_on_road_sample] < 0.2
+        # find time t_0.2 of first seeing invTau > 0.2
+        sample_indices = np.arange(self.scenario.n_time_steps)
+        above_thresh_samples = np.nonzero((sample_indices >= eyes_on_road_sample) & 
+            (self.scenario.ego.invTau[0,] >= 0.2))[0]
+        if len(above_thresh_samples) == 0:
+            raise Exception(
+                'Inverse tau never exceeds 0.2 1/s in non-response scenario - not supported by this implementation of the Markkula et al. (2016) model. Do you need to increase the simulation end time?')
+        self.t_02 = self.scenario.time_stamp[above_thresh_samples[0]]
         # find time t_C of non-response collision
+        non_pos_gap_samples = np.nonzero(self.scenario.ego.distance_gap[0,] <= 0)[0]
+        if len(non_pos_gap_samples) == 0:
+            raise Exception(
+                'No collision in non-response scenario - not supported by this implementation of the Markkula et al. (2016) model. Do you need to increase the simulation end time?')
+        self.t_C = self.scenario.time_stamp[non_pos_gap_samples[0]]
+        # prepare random number generator
+        self.rng = default_rng()
 
     def simulate_scenario_once(self, i_simulation):
         # get alpha_B
-        pass
+        if self.is_eyes_on_threat:
+            alpha_B = self.rng.normal(self.param_vals['mu_alpha_on'], 
+                self.param_vals['sigma_alpha_on'])
+        else:
+            alpha_B = self.rng.lognormal(self.param_vals['mu_alpha_off'], 
+                self.param_vals['sigma_alpha_off'])
         # get time of brake onset t_B
+        t_B = self.t_02 + alpha_B * (self.t_C - self.t_02)
+        self.outputs[DriverModelCapability.BRAKE_ONSET_TIME][i_simulation] = t_B
+        if alpha_B >= 1:
+            # no brake response
+            self.outputs[DriverModelCapability.BRAKE_CTRL].acceleration[
+                i_simulation,:] = np.full(self.scenario.n_time_steps, 0)
+        else:
+            # get inverse tau at brake onset
+            brake_onset_samples = np.nonzero(self.scenario.time_stamp >= t_B)[0]
+            assert len(brake_onset_samples) > 0 # based on the other checks done above this should always be ok
+            invTau_B = self.scenario.ego.invTau[0, brake_onset_samples[0]]
+            # get brake ramp-up jerk j_B
+            k_B = -G * self.rng.lognormal(self.param_vals['mu_k'], 
+                self.param_vals['sigma_k'])
+            j_B = k_B * invTau_B
+            # get maximum deceleration a_1
+            a_1 = self.rng.normal(self.param_vals['mu_a'], 
+                self.param_vals['sigma_a'])
+            # construct the acceleration signal
+            acc = j_B * (self.scenario.time_stamp - t_B)
+            acc = np.minimum(0, acc) # no positive acceleration
+            acc = np.maximum(a_1, acc) # acceleration not below a_1
+            self.outputs[DriverModelCapability.BRAKE_CTRL].acceleration[
+                i_simulation,:] = acc
+        # figure out the impact of this acceleration signal
+        self.outputs[DriverModelCapability.BRAKE_CTRL].set_kinematics_arrays_from_acc(
+            cp_time_series = self.scenario.cp, i_simulation = i_simulation)
 
-        # get brake ramp-up jerk j_B
-
-        # get maximum deceleration a_1
-
-        # construct the acceleration signal
-
-        # figure out the impactof this acceleration signal
-
+    def after_simulations(self):
+        self.outputs[DriverModelCapability.BRAKE_CTRL].set_looming_arrays(
+            self.scenario.param_vals['W_P'])
 
 
 if __name__ == "__main__":
@@ -441,15 +564,11 @@ if __name__ == "__main__":
     scenario.param_vals['T_a'] = 0
     scenario.param_vals['a_P'] = -0.35
 
-    fixed_ldt_model = FixedLDTModel()
-    fixed_ldt_model.param_vals['thetaDot_d'] = 0.002
-
-    mk2012_model = MaddoxAndKiefer2012Model()
-
     sim_engine = SimulationEngine(scenario)
-    sim_engine.param_vals['end_time'] = 15
-    sim_engine.param_vals['n_simulations'] = 100
-    sim_engine.add_driver_model(fixed_ldt_model)
-    sim_engine.add_driver_model(mk2012_model)
+    sim_engine.param_vals['end_time'] = 20
+    sim_engine.param_vals['n_simulations'] = 50
+    sim_engine.add_driver_model(FixedLDTModel())
+    sim_engine.add_driver_model(MaddoxAndKiefer2012Model())
+    sim_engine.add_driver_model(MarkkulaEtAl2016Model())
     sim_engine.simulate_driver_models()
     sim_engine.plot()
